@@ -1,286 +1,442 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { shaderMaterial } from "@react-three/drei";
+import { Canvas, extend, useFrame, useThree } from "@react-three/fiber";
+import {
+  AdditiveBlending,
+  BufferAttribute,
+  BufferGeometry,
+  Color,
+  Line,
+  LineBasicMaterial,
+  MathUtils,
+  PerspectiveCamera,
+  ShaderMaterial,
+  Vector3,
+  Vector2
+} from "three";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { Ref } from "react";
+import type { Group, Mesh } from "three";
 
-type OrbitalLine = {
-  color: string;
-  opacity: number;
-  points: number;
-  radiusX: number;
-  radiusY: number;
-  wobble: number;
-  turns: number;
-  phase: number;
-  rotation: number;
-  speed: number;
-  thickness: number;
-};
+const RibbonMaterial = shaderMaterial(
+  {
+    uTime: 0,
+    uColorA: new Color("#8af7ff"),
+    uColorB: new Color("#9f7bff"),
+    uOpacity: 0.22
+  },
+  `
+    uniform float uTime;
+    varying vec2 vUv;
+    varying float vWave;
 
-type Star = {
-  x: number;
-  y: number;
-  radius: number;
-  alpha: number;
-};
+    void main() {
+      vUv = uv;
+      vec3 p = position;
+      float sweep = sin((uv.x * 6.28318 * 3.0) + uTime * 0.45);
+      float fold = cos((uv.y * 6.28318 * 2.0) - uTime * 0.3);
+      p.z += sweep * 0.55 + fold * 0.35;
+      p.y += sin((uv.x * 6.28318 * 2.0) + uTime * 0.25) * 0.2;
+      vWave = sweep;
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
+    }
+  `,
+  `
+    uniform vec3 uColorA;
+    uniform vec3 uColorB;
+    uniform float uOpacity;
+    varying vec2 vUv;
+    varying float vWave;
 
-function createLines(): OrbitalLine[] {
-  return Array.from({ length: 16 }, (_, index) => {
-    const ratio = index / 16;
+    void main() {
+      float edge = smoothstep(0.0, 0.2, vUv.y) * (1.0 - smoothstep(0.8, 1.0, vUv.y));
+      float fade = smoothstep(0.0, 0.08, vUv.x) * (1.0 - smoothstep(0.82, 1.0, vUv.x));
+      float glow = pow(edge * fade, 1.35);
+      vec3 color = mix(uColorB, uColorA, vUv.x * 0.75 + vWave * 0.12 + 0.12);
+      gl_FragColor = vec4(color, glow * uOpacity);
+    }
+  `
+);
 
-    return {
-      color: ratio < 0.66 ? "#fff7df" : ratio < 0.82 ? "#9cefff" : "#b68cff",
-      opacity: 0.22 + ratio * 0.1,
-      points: 240,
-      radiusX: 220 + Math.sin(index * 0.65) * 18,
-      radiusY: 140 + Math.cos(index * 0.45) * 20,
-      wobble: 18 + ratio * 12,
-      turns: 7 + (index % 4),
-      phase: ratio * Math.PI * 1.2,
-      rotation: ratio * Math.PI * 0.9,
-      speed: 0.38 + ratio * 0.26,
-      thickness: 0.6 + (index % 3) * 0.35
+extend({ RibbonMaterial });
+
+declare module "@react-three/fiber" {
+  interface ThreeElements {
+    ribbonMaterial: {
+      ref?: Ref<ShaderMaterial>;
+      transparent?: boolean;
+      depthWrite?: boolean;
+      blending?: number;
+      uTime?: number;
+      uOpacity?: number;
+      uColorA?: Color;
+      uColorB?: Color;
+      side?: number;
     };
-  });
+  }
 }
 
-function createStars(total: number): Star[] {
-  return Array.from({ length: total }, () => ({
-    x: Math.random(),
-    y: Math.random(),
-    radius: Math.random() * 1.6 + 0.25,
-    alpha: Math.random() * 0.4 + 0.1
-  }));
+function createOrbitalCurve(
+  turns: number,
+  points: number,
+  radiusX: number,
+  radiusY: number,
+  wobble: number,
+  phase = 0
+) {
+  const positions = new Float32Array(points * 3);
+
+  for (let i = 0; i < points; i += 1) {
+    const t = (i / (points - 1)) * Math.PI * 2.0;
+    const harmonic = turns * t + phase;
+    const torusWave = Math.sin(harmonic) * wobble;
+    const rX = radiusX + torusWave * 0.55;
+    const rY = radiusY + torusWave;
+    positions[i * 3] = Math.cos(t) * rX;
+    positions[i * 3 + 1] = Math.sin(t) * rY;
+    positions[i * 3 + 2] = Math.sin(harmonic * 0.5) * wobble * 0.8;
+  }
+
+  return positions;
 }
 
-export function OrbitalScene() {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
+function OrbitalLines() {
+  const group = useRef<Group>(null);
+  const pointerForce = useRef(new Vector2());
+  const localPointer = useRef(new Vector3());
+  const unprojectedPointer = useRef(new Vector3());
+  const pointerDirection = useRef(new Vector3());
+  const pointerHit = useRef(new Vector3());
+  const lineData = useMemo(
+    () =>
+      Array.from({ length: 16 }, (_, index) => {
+        const ratio = index / 16;
+        return {
+          rotation: [
+            ratio * Math.PI * 1.75,
+            ratio * Math.PI * 0.95,
+            ratio * Math.PI * 0.6
+          ] as const,
+          color: ratio < 0.66 ? "#fff7df" : ratio < 0.82 ? "#a5fbff" : "#b68cff",
+          positions: createOrbitalCurve(
+            7 + (index % 4),
+            560,
+            3.35 + Math.sin(index * 0.7) * 0.28,
+            2.15 + Math.cos(index * 0.35) * 0.24,
+            0.32 + ratio * 0.18,
+            ratio * Math.PI
+          )
+        };
+      }),
+    []
+  );
+  const lines = useMemo(
+    () =>
+      lineData.map((item) => {
+        const geometry = new BufferGeometry();
+        geometry.setAttribute("position", new BufferAttribute(item.positions.slice(), 3));
+        const material = new LineBasicMaterial({
+          color: item.color,
+          transparent: true,
+          opacity: 0.72,
+          blending: AdditiveBlending
+        });
+        const line = new Line(geometry, material);
+        line.rotation.set(item.rotation[0], item.rotation[1], item.rotation[2]);
+        return line;
+      }),
+    [lineData]
+  );
 
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return;
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
+
+    if (group.current) {
+      group.current.rotation.x = 0.35 + t * 0.14;
+      group.current.rotation.y = t * 0.19;
+      group.current.rotation.z = Math.sin(t * 0.42) * 0.18;
+
+      const breath = 1 + Math.sin(t * 0.82) * 0.06;
+      const floatY = Math.sin(t * 0.62) * 0.28;
+      group.current.scale.setScalar(breath);
+      group.current.position.y = floatY;
+
+      const camera = state.camera as PerspectiveCamera;
+      unprojectedPointer.current.set(state.pointer.x, state.pointer.y, 0.5).unproject(camera);
+      pointerDirection.current
+        .copy(unprojectedPointer.current)
+        .sub(camera.position)
+        .normalize();
+
+      const distanceToScenePlane =
+        Math.abs(pointerDirection.current.z) > 0.0001
+          ? -camera.position.z / pointerDirection.current.z
+          : 0;
+
+      pointerHit.current
+        .copy(camera.position)
+        .add(pointerDirection.current.multiplyScalar(distanceToScenePlane));
+
+      localPointer.current.copy(pointerHit.current);
+      group.current.worldToLocal(localPointer.current);
+
+      pointerForce.current.x = MathUtils.lerp(pointerForce.current.x, localPointer.current.x, 0.14);
+      pointerForce.current.y = MathUtils.lerp(pointerForce.current.y, localPointer.current.y, 0.14);
     }
 
-    const context = canvas.getContext("2d");
-    if (!context) {
-      return;
-    }
+    lines.forEach((line, index) => {
+      const positions = line.geometry.attributes.position.array as Float32Array;
+      const base = lineData[index].positions;
+      for (let i = 0; i < positions.length; i += 3) {
+        const x = base[i];
+        const y = base[i + 1];
+        const z = base[i + 2];
+        const distance = Math.sqrt(x * x + y * y);
+        const wave = Math.sin(distance * 1.95 - t * 1.55 + index * 0.5) * 0.1;
+        const twist = Math.cos(distance * 1.45 + t * 1.15 + index * 0.2) * 0.085;
+        const normalizedDistance = Math.max(distance, 0.001);
+        const animatedX = x + (x / normalizedDistance) * wave;
+        const animatedY = y + (y / normalizedDistance) * wave;
+        const dx = animatedX - pointerForce.current.x;
+        const dy = animatedY - pointerForce.current.y;
+        const pointerDistance = Math.sqrt(dx * dx + dy * dy);
+        const repelRadius = 2.1;
+        const repelStrength =
+          pointerDistance < repelRadius
+            ? Math.pow(1 - pointerDistance / repelRadius, 2) * 1.15
+            : 0;
+        const repelSafeDistance = Math.max(pointerDistance, 0.001);
 
-    const lines = createLines();
-    const stars = createStars(180);
-    const pointer = { x: 0, y: 0, targetX: 0, targetY: 0, active: false };
-    let width = 0;
-    let height = 0;
-    let centerX = 0;
-    let centerY = 0;
-    let maxRadius = 0;
-    let animationFrame = 0;
-
-    const resize = () => {
-      width = window.innerWidth;
-      height = window.innerHeight;
-      centerX = width / 2;
-      centerY = height / 2;
-      maxRadius = Math.min(width, height) * 0.34;
-
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.floor(width * dpr);
-      canvas.height = Math.floor(height * dpr);
-      canvas.style.width = `${width}px`;
-      canvas.style.height = `${height}px`;
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-    };
-
-    const handlePointerMove = (event: PointerEvent) => {
-      pointer.targetX = event.clientX;
-      pointer.targetY = event.clientY;
-      pointer.active = true;
-    };
-
-    const handlePointerLeave = () => {
-      pointer.active = false;
-    };
-
-    const drawBackground = (time: number) => {
-      context.clearRect(0, 0, width, height);
-
-      const baseGradient = context.createLinearGradient(0, 0, 0, height);
-      baseGradient.addColorStop(0, "#020511");
-      baseGradient.addColorStop(0.55, "#030711");
-      baseGradient.addColorStop(1, "#010203");
-      context.fillStyle = baseGradient;
-      context.fillRect(0, 0, width, height);
-
-      const glow = context.createRadialGradient(centerX, centerY, 0, centerX, centerY, maxRadius * 1.2);
-      glow.addColorStop(0, "rgba(150, 196, 255, 0.22)");
-      glow.addColorStop(0.38, "rgba(84, 126, 188, 0.14)");
-      glow.addColorStop(1, "rgba(0, 0, 0, 0)");
-      context.fillStyle = glow;
-      context.fillRect(0, 0, width, height);
-
-      context.strokeStyle = "rgba(188, 218, 255, 0.08)";
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(centerX, 0);
-      context.lineTo(centerX, height);
-      context.moveTo(0, centerY);
-      context.lineTo(width, centerY);
-      context.stroke();
-
-      const ringPulse = 1 + Math.sin(time * 0.55) * 0.02;
-      [0.58, 0.76].forEach((scale, index) => {
-        context.beginPath();
-        context.strokeStyle = index === 0 ? "rgba(165, 209, 255, 0.12)" : "rgba(130, 152, 228, 0.1)";
-        context.lineWidth = 1;
-        context.arc(centerX, centerY, maxRadius * scale * ringPulse, 0, Math.PI * 2);
-        context.stroke();
-      });
-    };
-
-    const drawStars = (time: number) => {
-      for (const star of stars) {
-        const x = star.x * width;
-        const y = star.y * height;
-        const alpha = star.alpha + Math.sin(time * 0.5 + star.x * 12 + star.y * 6) * 0.08;
-        context.beginPath();
-        context.fillStyle = `rgba(166, 200, 255, ${Math.max(alpha, 0.04)})`;
-        context.arc(x, y, star.radius, 0, Math.PI * 2);
-        context.fill();
+        positions[i] = animatedX + (dx / repelSafeDistance) * repelStrength;
+        positions[i + 1] = animatedY + (dy / repelSafeDistance) * repelStrength;
+        positions[i + 2] = z + twist + repelStrength * 0.28;
       }
-    };
+      line.geometry.attributes.position.needsUpdate = true;
+      (line.material as { opacity: number }).opacity =
+        0.6 + Math.sin(t * 1.05 + index * 0.65) * 0.13;
+    });
+  });
 
-    const drawRibbons = (time: number) => {
-      const ribbonConfigs = [
-        { colorA: "80, 220, 255", colorB: "123, 99, 255", width: 260, height: 54, rotation: 0.3, offsetY: -20 },
-        { colorA: "96, 213, 255", colorB: "159, 123, 255", width: 220, height: 42, rotation: -0.6, offsetY: 22 },
-        { colorA: "88, 198, 255", colorB: "135, 111, 255", width: 300, height: 32, rotation: 1.04, offsetY: 0 }
-      ];
+  return (
+    <group ref={group}>
+      {lines.map((line, index) => (
+        <primitive key={index} object={line} />
+      ))}
+    </group>
+  );
+}
 
-      ribbonConfigs.forEach((ribbon, index) => {
-        context.save();
-        context.translate(centerX, centerY + ribbon.offsetY);
-        context.rotate(ribbon.rotation + Math.sin(time * 0.18 + index) * 0.08);
+function RibbonWaves() {
+  const group = useRef<Group>(null);
+  const ribbons = useRef<ShaderMaterial[]>([]);
+  const planes = useMemo(
+    () =>
+      [
+        { scale: 9.5, rotation: [0.32, 0.65, 0.28], position: [0, 0.2, 0], opacity: 0.04 },
+        { scale: 8.3, rotation: [-0.55, -0.2, 1.1], position: [0, -0.35, 0], opacity: 0.035 },
+        { scale: 10.2, rotation: [0.1, -0.82, -0.6], position: [0, 0.45, 0], opacity: 0.03 }
+      ] as const,
+    []
+  );
 
-        for (let layer = 0; layer < 10; layer += 1) {
-          const progress = layer / 9;
-          const alpha = 0.018 - progress * 0.0012;
-          const wave = Math.sin(time * 0.9 + progress * Math.PI * 2 + index) * 12;
+  useFrame((state) => {
+    const t = state.clock.elapsedTime;
 
-          context.beginPath();
-          for (let step = 0; step <= 120; step += 1) {
-            const t = step / 120;
-            const x = (t - 0.5) * ribbon.width;
-            const y =
-              Math.sin(t * Math.PI * 2.2 + time * 0.9 + index) * ribbon.height * (0.36 - progress * 0.16) +
-              Math.cos(t * Math.PI * 3.4 - time * 0.5) * 8 +
-              wave * (0.12 - progress * 0.05);
+    if (group.current) {
+      group.current.rotation.y = t * 0.04;
+      group.current.rotation.z = Math.sin(t * 0.22) * 0.12;
+    }
 
-            if (step === 0) {
-              context.moveTo(x, y);
-            } else {
-              context.lineTo(x, y);
-            }
-          }
+    ribbons.current.forEach((material, index) => {
+      material.uniforms.uTime.value = t + index * 0.8;
+      material.uniforms.uOpacity.value = planes[index].opacity + Math.sin(t * 0.45 + index) * 0.025;
+    });
+  });
 
-          context.strokeStyle =
-            index % 2 === 0
-              ? `rgba(${ribbon.colorA}, ${alpha})`
-              : `rgba(${ribbon.colorB}, ${alpha})`;
-          context.lineWidth = 28 - progress * 16;
-          context.stroke();
-        }
+  return (
+    <group ref={group}>
+      {planes.map((plane, index) => (
+        <mesh
+          key={index}
+          position={plane.position}
+          rotation={plane.rotation}
+          scale={plane.scale}
+        >
+          <planeGeometry args={[1.8, 6.8, 96, 96]} />
+          <ribbonMaterial
+            ref={(node) => {
+              if (node) {
+                ribbons.current[index] = node;
+              }
+            }}
+            transparent
+            depthWrite={false}
+            blending={AdditiveBlending}
+            uOpacity={plane.opacity}
+          />
+        </mesh>
+      ))}
+    </group>
+  );
+}
 
-        context.restore();
-      });
-    };
-
-    const drawOrbitalLines = (time: number) => {
-      const pointerRadius = Math.min(width, height) * 0.11;
-      pointer.x += (pointer.targetX - pointer.x) * 0.12;
-      pointer.y += (pointer.targetY - pointer.y) * 0.12;
-
-      lines.forEach((line, index) => {
-        context.save();
-        context.translate(centerX, centerY + Math.sin(time * 0.62) * 16);
-        context.rotate(line.rotation + time * line.speed * 0.1);
-
-        context.beginPath();
-
-        for (let step = 0; step <= line.points; step += 1) {
-          const t = (step / line.points) * Math.PI * 2;
-          const harmonic = line.turns * t + line.phase + time * line.speed;
-          const torusWave = Math.sin(harmonic) * line.wobble;
-          const baseX = Math.cos(t) * (line.radiusX + torusWave * 0.55);
-          const baseY = Math.sin(t) * (line.radiusY + torusWave);
-          const wave = Math.sin(t * 5.4 - time * 1.55 + index * 0.45) * 7;
-          const twist = Math.cos(t * 3.8 + time * 1.05 + index * 0.22) * 5;
-          let x = baseX + Math.cos(t) * wave;
-          let y = baseY + Math.sin(t) * wave + twist;
-
-          const globalX = x + centerX;
-          const globalY = y + centerY + Math.sin(time * 0.62) * 16;
-
-          if (pointer.active) {
-            const dx = globalX - pointer.x;
-            const dy = globalY - pointer.y;
-            const distance = Math.hypot(dx, dy);
-
-            if (distance < pointerRadius) {
-              const force = Math.pow(1 - distance / pointerRadius, 2) * 44;
-              const safeDistance = Math.max(distance, 0.001);
-              x += (dx / safeDistance) * force;
-              y += (dy / safeDistance) * force;
-            }
-          }
-
-          if (step === 0) {
-            context.moveTo(x, y);
-          } else {
-            context.lineTo(x, y);
-          }
-        }
-
-        context.strokeStyle = line.color;
-        context.globalAlpha = line.opacity + Math.sin(time * 0.8 + index * 0.5) * 0.08;
-        context.lineWidth = line.thickness;
-        context.shadowColor = line.color;
-        context.shadowBlur = 10;
-        context.stroke();
-        context.restore();
-      });
-    };
-
-    const render = (now: number) => {
-      const time = now * 0.001;
-      drawBackground(time);
-      drawStars(time);
-      drawRibbons(time);
-      drawOrbitalLines(time);
-      animationFrame = window.requestAnimationFrame(render);
-    };
-
-    resize();
-    pointer.targetX = centerX;
-    pointer.targetY = centerY;
-    pointer.x = centerX;
-    pointer.y = centerY;
-
-    window.addEventListener("resize", resize);
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerleave", handlePointerLeave);
-    animationFrame = window.requestAnimationFrame(render);
-
-    return () => {
-      window.cancelAnimationFrame(animationFrame);
-      window.removeEventListener("resize", resize);
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerleave", handlePointerLeave);
-    };
+function Starfield() {
+  const points = useMemo(() => {
+    const positions = new Float32Array(240 * 3);
+    for (let i = 0; i < 240; i += 1) {
+      const radius = 18 + Math.random() * 20;
+      const theta = Math.random() * Math.PI * 2;
+      const phi = Math.acos(2 * Math.random() - 1);
+      positions[i * 3] = radius * Math.sin(phi) * Math.cos(theta);
+      positions[i * 3 + 1] = radius * Math.sin(phi) * Math.sin(theta);
+      positions[i * 3 + 2] = -8 - Math.random() * 20;
+    }
+    return positions;
   }, []);
 
   return (
+    <points>
+      <bufferGeometry>
+        <bufferAttribute
+          attach="attributes-position"
+          args={[points, 3]}
+          count={points.length / 3}
+          array={points}
+          itemSize={3}
+        />
+      </bufferGeometry>
+      <pointsMaterial
+        color="#a6c8ff"
+        size={0.05}
+        sizeAttenuation
+        transparent
+        opacity={0.45}
+        depthWrite={false}
+      />
+    </points>
+  );
+}
+
+function Atmosphere() {
+  const mesh = useRef<Mesh>(null);
+
+  useFrame((state) => {
+    if (!mesh.current) {
+      return;
+    }
+
+    const t = state.clock.elapsedTime;
+    mesh.current.rotation.z = t * 0.01;
+    const breath = 1 + Math.sin(t * 0.2) * 0.02;
+    mesh.current.scale.setScalar(1.15 * breath);
+  });
+
+  return (
+    <mesh ref={mesh}>
+      <sphereGeometry args={[7.5, 64, 64]} />
+      <meshBasicMaterial color="#000000" transparent opacity={0} />
+    </mesh>
+  );
+}
+
+function CameraRig() {
+  const { camera, pointer } = useThree();
+  const target = useRef(new Vector2());
+
+  useFrame((state, delta) => {
+    const t = state.clock.elapsedTime;
+    target.current.x = pointer.x * 0.65;
+    target.current.y = pointer.y * 0.4;
+
+    camera.position.x = MathUtils.lerp(
+      camera.position.x,
+      target.current.x + Math.sin(t * 0.18) * 0.75,
+      delta * 1.8
+    );
+    camera.position.y = MathUtils.lerp(
+      camera.position.y,
+      target.current.y + Math.cos(t * 0.14) * 0.45,
+      delta * 1.6
+    );
+    camera.position.z = MathUtils.lerp(camera.position.z, 11.2 + Math.sin(t * 0.28) * 0.35, delta);
+    camera.lookAt(0, 0, 0);
+  });
+
+  return null;
+}
+
+function SceneContents() {
+  return (
+    <>
+      <color attach="background" args={["#000000"]} />
+      <fog attach="fog" args={["#000000", 14, 30]} />
+      <ambientLight intensity={0.18} color="#9cc8ff" />
+      <pointLight position={[0, 0, 4]} intensity={6} color="#fff2dc" />
+      <pointLight position={[4, 3, -2]} intensity={1.8} color="#75f1ff" />
+      <pointLight position={[-4, -2, -2]} intensity={1.6} color="#9f7bff" />
+      <CameraRig />
+      <Starfield />
+      <Atmosphere />
+      <RibbonWaves />
+      <OrbitalLines />
+    </>
+  );
+}
+
+function canUseWebGL() {
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(
+      canvas.getContext("webgl2", { powerPreference: "high-performance" }) ||
+        canvas.getContext("webgl", { powerPreference: "high-performance" }) ||
+        canvas.getContext("experimental-webgl")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function SceneFallback() {
+  return (
     <div className="relative h-full w-full overflow-hidden bg-[#02040a]">
-      <canvas ref={canvasRef} className="absolute inset-0 h-full w-full" />
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(119,236,255,0.18),transparent_26%),radial-gradient(circle_at_50%_50%,rgba(173,127,255,0.14),transparent_34%),linear-gradient(180deg,#050814_0%,#010203_100%)]" />
+      <div className="absolute left-1/2 top-1/2 h-[20rem] w-[20rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/15" />
+      <div className="absolute left-1/2 top-1/2 h-[26rem] w-[26rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-violet-300/10" />
+      <div className="absolute left-1/2 top-1/2 h-[13rem] w-[13rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-200/10 blur-3xl" />
+      <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-cyan-100/30 to-transparent" />
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-violet-200/20 to-transparent" />
+      <div className="absolute bottom-8 left-1/2 w-full max-w-md -translate-x-1/2 px-6 text-center text-sm text-white/60">
+        3D animation is not available on this device or browser, so a lightweight fallback is shown.
+      </div>
+    </div>
+  );
+}
+
+export function OrbitalScene() {
+  const [canRenderScene, setCanRenderScene] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setCanRenderScene(canUseWebGL());
+  }, []);
+
+  if (canRenderScene === false) {
+    return <SceneFallback />;
+  }
+
+  if (canRenderScene === null) {
+    return <div className="h-full w-full bg-black" />;
+  }
+
+  return (
+    <div className="h-full w-full">
+      <Canvas
+        dpr={[1, 1.5]}
+        camera={{ position: [0, 0, 11.5], fov: 34, near: 0.1, far: 100 }}
+        gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
+      >
+        <SceneContents />
+      </Canvas>
     </div>
   );
 }
