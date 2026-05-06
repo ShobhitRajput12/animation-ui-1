@@ -1,14 +1,4 @@
-"use client";
-
-import dynamic from "next/dynamic";
-
-const OrbitalScene = dynamic(
-  () => import("@/components/orbital-scene").then((mod) => mod.OrbitalScene),
-  {
-    ssr: false,
-    loading: () => <div className="h-full w-full bg-black" />
-  }
-);
+import { OrbitalScene } from "@/components/orbital-scene";
 
 export default function Home() {
   return (

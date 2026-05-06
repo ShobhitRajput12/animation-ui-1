@@ -15,7 +15,7 @@ import {
   Vector3,
   Vector2
 } from "three";
-import { useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { Ref } from "react";
 import type { Group, Mesh } from "three";
 
@@ -384,11 +384,54 @@ function SceneContents() {
   );
 }
 
+function canUseWebGL() {
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(
+      canvas.getContext("webgl2", { powerPreference: "high-performance" }) ||
+        canvas.getContext("webgl", { powerPreference: "high-performance" }) ||
+        canvas.getContext("experimental-webgl")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function SceneFallback() {
+  return (
+    <div className="relative h-full w-full overflow-hidden bg-[#02040a]">
+      <div className="absolute inset-0 bg-[radial-gradient(circle_at_50%_45%,rgba(119,236,255,0.18),transparent_26%),radial-gradient(circle_at_50%_50%,rgba(173,127,255,0.14),transparent_34%),linear-gradient(180deg,#050814_0%,#010203_100%)]" />
+      <div className="absolute left-1/2 top-1/2 h-[20rem] w-[20rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-cyan-200/15" />
+      <div className="absolute left-1/2 top-1/2 h-[26rem] w-[26rem] -translate-x-1/2 -translate-y-1/2 rounded-full border border-violet-300/10" />
+      <div className="absolute left-1/2 top-1/2 h-[13rem] w-[13rem] -translate-x-1/2 -translate-y-1/2 rounded-full bg-cyan-200/10 blur-3xl" />
+      <div className="absolute inset-x-0 top-1/2 h-px -translate-y-1/2 bg-gradient-to-r from-transparent via-cyan-100/30 to-transparent" />
+      <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-gradient-to-b from-transparent via-violet-200/20 to-transparent" />
+      <div className="absolute bottom-8 left-1/2 w-full max-w-md -translate-x-1/2 px-6 text-center text-sm text-white/60">
+        3D animation is not available on this device or browser, so a lightweight fallback is shown.
+      </div>
+    </div>
+  );
+}
+
 export function OrbitalScene() {
+  const [canRenderScene, setCanRenderScene] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    setCanRenderScene(canUseWebGL());
+  }, []);
+
+  if (canRenderScene === false) {
+    return <SceneFallback />;
+  }
+
+  if (canRenderScene === null) {
+    return <div className="h-full w-full bg-black" />;
+  }
+
   return (
     <div className="h-full w-full">
       <Canvas
-        dpr={[1, 1.75]}
+        dpr={[1, 1.5]}
         camera={{ position: [0, 0, 11.5], fov: 34, near: 0.1, far: 100 }}
         gl={{ antialias: true, alpha: false, powerPreference: "high-performance" }}
       >
