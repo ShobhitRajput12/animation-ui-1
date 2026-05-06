@@ -1,6 +1,5 @@
 "use client";
 
-import { Bloom, EffectComposer } from "@react-three/postprocessing";
 import { shaderMaterial } from "@react-three/drei";
 import { Canvas, extend, useFrame, useThree } from "@react-three/fiber";
 import {
@@ -381,14 +380,6 @@ function SceneContents() {
       <Atmosphere />
       <RibbonWaves />
       <OrbitalLines />
-      <EffectComposer>
-        <Bloom
-          intensity={1.7}
-          luminanceThreshold={0.08}
-          luminanceSmoothing={0.45}
-          mipmapBlur
-        />
-      </EffectComposer>
     </>
   );
 }
